@@ -1,0 +1,842 @@
+---
+title: "对 Hurst & Kavanagh (2017) 研究结果的计算可复现性检验"
+output: md_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(readxl)
+library(dplyr)
+library(tibble)
+library(knitr)
+library(psych)
+library(ppcor)
+
+paper_pdf <- "/Users/hyijie/Desktop/R4psy_homework_Hurst_et_al_2017/2_script/Codex/Hurst and Kavanagh - 2017 - Life history strategies and psychopathology the faster the life strategies, the more symptoms of ps.pdf"
+data_path <- "/Users/hyijie/Desktop/R4psy_homework_Hurst_et_al_2017/1_Data/datasets.csv"
+codebook_path <- "/Users/hyijie/Desktop/R4psy_homework_Hurst_et_al_2017/1_Data/code_book.xlsx"
+
+dat <- read.csv(data_path, stringsAsFactors = FALSE)
+codebook <- readxl::read_excel(codebook_path)
+
+comparison_registry <- list()
+
+fmt_num <- function(x, digits = 2) {
+  ifelse(is.na(x), NA_character_, formatC(x, digits = digits, format = "f"))
+}
+
+fmt_pct <- function(x, digits = 1) {
+  ifelse(is.na(x), NA_character_, paste0(formatC(x, digits = digits, format = "f"), "%"))
+}
+
+fmt_p <- function(x, digits = 3) {
+  out <- rep(NA_character_, length(x))
+  out[!is.na(x) & x < .001] <- "< .001"
+  out[!is.na(x) & x >= .001] <- paste0("= ", formatC(x[!is.na(x) & x >= .001], digits = digits, format = "f"))
+  out
+}
+
+same_side_alpha <- function(author_sig, my_p, alpha = .05) {
+  ifelse(is.na(author_sig) | is.na(my_p), NA, author_sig == (my_p < alpha))
+}
+
+calc_delta <- function(author_value, my_value) {
+  ifelse(is.na(author_value) | is.na(my_value), NA_real_, 100 * abs(author_value - my_value) / abs(my_value))
+}
+
+rate_delta <- function(author_value, my_value, rounding_tol = 0.02) {
+  if (is.na(author_value) || is.na(my_value)) return("无法进行可重复检验")
+  if (identical(unname(author_value), unname(my_value)) || abs(author_value - my_value) < .Machine$double.eps^0.5) {
+    return("完全一致")
+  }
+  if (abs(author_value - my_value) <= rounding_tol) {
+    return("因舍入导致的偏差")
+  }
+  delta <- calc_delta(author_value, my_value)
+  if (is.na(delta)) return("无法进行可重复检验")
+  if (delta < 10) return("偏差较小")
+  "偏差较大"
+}
+
+decide_reproduced <- function(rating, inference_match = NA) {
+  if (is.na(inference_match)) {
+    if (rating %in% c("完全一致", "偏差较小", "因舍入导致的偏差")) return("是")
+    if (rating %in% c("偏差较大", "无法进行可重复检验")) return("否")
+    return("否")
+  }
+  if (!inference_match) return("否")
+  if (rating %in% c("完全一致", "偏差较小", "因舍入导致的偏差")) return("是")
+  if (rating == "无法进行可重复检验") return("是")
+  "否"
+}
+
+register_table <- function(name, tbl) {
+  comparison_registry[[name]] <<- tbl
+  invisible(tbl)
+}
+
+aaq_angry_items <- paste0("AAQ_0", 1:3)
+aaq_avail_items <- paste0("AAQ_0", 4:6)
+aaq_goal_items  <- paste0("AAQ_0", 7:9)
+
+bpas_physical_items <- paste0("BPAS_", sprintf("%02d", 1:9))
+bpas_verbal_items   <- paste0("BPAS_", sprintf("%02d", 10:14))
+bpas_anger_items    <- paste0("BPAS_", sprintf("%02d", 15:21))
+bpas_hostile_items  <- paste0("BPAS_", sprintf("%02d", 22:29))
+
+minik_items <- paste0("MiniK_", sprintf("%02d", 1:20))
+hkss_items  <- paste0("HKSS_", sprintf("%02d", 1:22))
+
+self_harm_binary_map <- c(
+  "Cutting" = "SH_01",
+  "Burning with cigarette" = "SH_02",
+  "Burning with a lighter or match" = "SH_03",
+  "Carving words into skin" = "SH_04",
+  "Carving pictures into skin" = "SH_06",
+  "Severe scratching" = "SH_07",
+  "Biting" = "SH_05",
+  "Rubbing sandpaper on skin" = "SH_08",
+  "Dripping acid on skin" = "SH_09",
+  "Using bleach or oven cleaner on skin" = "SH_10",
+  "Sticking pins, staples or needles into skin" = "SH_11",
+  "Rubbing glass on skin" = "SH_12",
+  "Breaking bones" = "SH_13",
+  "Banging head" = "SH_14",
+  "Punching self" = "SH_15",
+  "Preventing wounds from healing" = "SH_16",
+  "Alternate forms of self-harm" = "SH_17"
+)
+
+self_harm_freq_cols <- c(paste0("SH_", sprintf("%02d", 1:16), "b"), "SH_17c")
+
+table2_labels <- c(
+  "Little interest or pleasure in doing things?" = "DSM5_01",
+  "Feeling down, depressed, or hopeless?" = "DSM5_02",
+  "Feeling more irritated, grouchy, or angry than usual?" = "DSM5_03",
+  "Sleeping less than usual, but still have a lot of energy?" = "DSM5_04",
+  "Starting lots more projects than usual or doing more risky things than usual?" = "DSM5_05",
+  "Feeling nervous, anxious, frightened, worried, or on edge?" = "DSM5_06",
+  "Feeling panic or being frightened?" = "DSM5_07",
+  "Avoiding situations that make you anxious?" = "DSM5_08",
+  "Unexplained aches and pains?" = "DSM5_09",
+  "Feeling that your illnesses are not being taken seriously enough?" = "DSM5_10",
+  "Thoughts of actually hurting yourself?" = "DSM5_11",
+  "Hearing things other people couldn't hear?" = "DSM5_12",
+  "Feeling that someone could hear your thoughts?" = "DSM5_13",
+  "Problems with sleep that affected your sleep quality overall?" = "DSM5_14",
+  "Problems with memory or finding your way home?" = "DSM5_15",
+  "Unpleasant thoughts, urges, or images repeatedly entering your mind?" = "DSM5_16",
+  "Feeling driven to perform certain behaviours or mental acts over and over again?" = "DSM5_17",
+  "Feeling detached or distant from yourself/body/surroundings/memories?" = "DSM5_18",
+  "Not knowing who you really are or what you want out of life?" = "DSM5_19",
+  "Not feeling close to other people or enjoying your relationships with them?" = "DSM5_20",
+  "Drinking at least 4 drinks of alcohol in a single day?" = "DSM5_21",
+  "Smoking cigarettes/cigar/pipe/snuff/chewing tobacco?" = "DSM5_22",
+  "Using medicines on your own in greater amounts or longer than prescribed?" = "DSM5_23"
+)
+
+table2_author_pct <- c(
+  34.1, 29.7, 36.2, 28.3, 18.8, 35.5, 21.0, 34.1, 29.0, 15.2,
+  18.8, 7.2, 6.5, 31.2, 15.2, 20.3, 10.1, 13.8, 30.4, 26.8, 34.1, 12.3, 9.4
+)
+
+table3_author_counts <- tribble(
+  ~behavior, ~women_n, ~women_pct, ~men_n, ~men_pct,
+  "Cutting", 13, 14.0, 6, 13.0,
+  "Burning with cigarette", 5, 5.4, 1, 2.2,
+  "Burning with a lighter or match", 3, 3.3, 3, 6.5,
+  "Carving words into skin", 6, 6.5, 0, 0.0,
+  "Carving pictures into skin", 1, 1.1, 0, 0.0,
+  "Severe scratching", 10, 10.9, 2, 4.3,
+  "Biting", 6, 6.5, 2, 4.3,
+  "Rubbing sandpaper on skin", 0, 0.0, 2, 4.3,
+  "Dripping acid on skin", 0, 0.0, 0, 0.0,
+  "Using bleach or oven cleaner on skin", 0, 0.0, 0, 0.0,
+  "Sticking pins, staples or needles into skin", 3, 3.3, 5, 11.4,
+  "Rubbing glass on skin", 1, 1.1, 0, 0.0,
+  "Breaking bones", 1, 1.1, 0, 0.0,
+  "Banging head", 1, 1.1, 5, 10.9,
+  "Punching self", 4, 4.3, 2, 4.3,
+  "Preventing wounds from healing", 3, 3.3, 1, 2.2,
+  "Alternate forms of self-harm", 4, 4.3, 8, 17.4
+)
+
+paper_table4 <- tribble(
+  ~variable, ~author_r_age, ~author_r_sex, ~author_sig_age, ~author_sig_sex,
+  "Total attachment", -0.21, 0.06, TRUE, FALSE,
+  "Availability", -0.15, 0.02, FALSE, FALSE,
+  "Angry distress", -0.29, 0.10, TRUE, FALSE,
+  "Goal-corrected partnership", -0.11, 0.03, FALSE, FALSE,
+  "Total aggression", -0.39, 0.09, TRUE, FALSE,
+  "Physical aggression", -0.36, 0.01, TRUE, FALSE,
+  "Verbal aggression", -0.32, -0.06, TRUE, FALSE,
+  "Anger", -0.26, 0.19, TRUE, TRUE,
+  "Hostility", -0.32, 0.13, TRUE, FALSE,
+  "Total psychopathology", -0.43, 0.01, TRUE, FALSE,
+  "Total frequency of self-harm", -0.15, 0.01, FALSE, FALSE
+)
+
+paper_table5 <- tribble(
+  ~measure, ~author_minik, ~author_hkss, ~alpha_threshold,
+  "Number of full biological siblings", 0.01, 0.03, .002,
+  "Number of half-siblings", -0.10, -0.20, .002,
+  "Number of step-siblings", -0.05, -0.08, .002,
+  "Presence of stepparent", -0.19, -0.06, .002,
+  "Total psychopathology", -0.51, -0.41, .002,
+  "Total frequency of self-harm", -0.04, -0.17, .002,
+  "Total attachment", -0.42, -0.41, .002,
+  "Availability", -0.39, -0.37, .002,
+  "Angry distress", -0.44, -0.44, .002,
+  "Goal-corrected partnership", -0.39, -0.24, .002,
+  "Total aggression", -0.46, -0.43, .002,
+  "Physical aggression", -0.44, -0.34, .002,
+  "Verbal aggression", -0.03, -0.10, .002,
+  "Anger", -0.31, -0.25, .002,
+  "Hostility", -0.52, -0.52, .002
+)
+
+partial_cor <- function(x, y, covar = "Age") {
+  ppcor::pcor.test(dat[[x]], dat[[y]], dat[covar])
+}
+
+standardized_beta <- function(model, data) {
+  coefs <- coef(model)[-1]
+  y_sd <- sd(model$model[[1]])
+  betas <- sapply(names(coefs), function(x) coef(model)[x] * sd(data[[x]]) / y_sd)
+  names(betas) <- names(coefs)
+  betas
+}
+
+make_numeric_row <- function(statistic, author_value, my_value, author_sig = NA, my_p = NA, alpha = .05, notes = "", digits = 2) {
+  rating <- rate_delta(author_value, my_value)
+  inference_match <- same_side_alpha(author_sig, my_p, alpha)
+  tibble(
+    statistic = statistic,
+    author_result = fmt_num(author_value, digits),
+    my_result = fmt_num(my_value, digits),
+    delta_pct = fmt_pct(calc_delta(author_value, my_value), 2),
+    rating = rating,
+    inference_match = ifelse(is.na(inference_match), NA_character_, ifelse(inference_match, "是", "否")),
+    reproduced = decide_reproduced(rating, inference_match),
+    notes = notes
+  )
+}
+```
+
+# 说明
+
+- 复现判定优先依据 `心理学院R编程语言课程可重复检验指南(2025版).docx`，不足之处参考 `心理学院R编程语言课程可重复检验指南(量化版)2024.docx`。
+- 数值结果比较使用 `δ = 100 × |XR - XO| / |XO|`，其中 `XR` 为原文结果，`XO` 为本次复现结果。
+- 分级采用：
+  - `完全一致`
+  - `偏差较小`：`0 < δ < 10%`
+  - `偏差较大`：`δ >= 10%`
+  - `因舍入导致的偏差`
+  - `无法进行可重复检验`
+- 对推断性统计，额外比较原文和复现的 `p` 是否落在同一 `alpha` 边界两侧。
+- 本次拿到的数据文件 `datasets.csv` 已经是作者最终分析样本 `N = 138`，因此无法直接 从原始 `209` 人起点重新演算排除 `71` 人的过程；这一点会在样本筛选分析里单独标注。
+
+## 数据读取与预处理说明
+
+```{r data_overview}
+tibble(
+  dataset_path = data_path,
+  codebook_path = codebook_path,
+  n_rows = nrow(dat),
+  n_cols = ncol(dat),
+  women_n = sum(dat$Sex == 2, na.rm = TRUE),
+  men_n = sum(dat$Sex == 1, na.rm = TRUE)
+) |>
+  kable()
+```
+
+```{r analysis_01_sample_description}
+sample_comp <- tribble(
+  ~statistic, ~author_result, ~my_result, ~delta_pct, ~rating, ~inference_match, ~reproduced, ~notes,
+  "起始样本量", "209", NA_character_, NA_character_, "无法进行可重复检验", NA_character_, "否", "提供的数据已是最终分析样本，无法回推起始作答人数",
+  "因未完成量表而排除人数", "71", NA_character_, NA_character_, "无法进行可重复检验", NA_character_, "否", "提供的数据已完成筛选，无法直接重建排除过程",
+  "最终样本量", "138", as.character(nrow(dat)), fmt_pct(calc_delta(138, nrow(dat)), 2), rate_delta(138, nrow(dat)), NA_character_, decide_reproduced(rate_delta(138, nrow(dat))), "",
+  "男性人数", "46", as.character(sum(dat$Sex == 1)), fmt_pct(calc_delta(46, sum(dat$Sex == 1)), 2), rate_delta(46, sum(dat$Sex == 1)), NA_character_, decide_reproduced(rate_delta(46, sum(dat$Sex == 1))), "",
+  "女性人数", "92", as.character(sum(dat$Sex == 2)), fmt_pct(calc_delta(92, sum(dat$Sex == 2)), 2), rate_delta(92, sum(dat$Sex == 2)), NA_character_, decide_reproduced(rate_delta(92, sum(dat$Sex == 2))), "",
+  "男性年龄均值", "36.67", fmt_num(mean(dat$Age[dat$Sex == 1]), 2), fmt_pct(calc_delta(36.67, mean(dat$Age[dat$Sex == 1])), 2), rate_delta(36.67, mean(dat$Age[dat$Sex == 1])), NA_character_, decide_reproduced(rate_delta(36.67, mean(dat$Age[dat$Sex == 1]))), "",
+  "男性年龄SD", "15.73", fmt_num(sd(dat$Age[dat$Sex == 1]), 2), fmt_pct(calc_delta(15.73, sd(dat$Age[dat$Sex == 1])), 2), rate_delta(15.73, sd(dat$Age[dat$Sex == 1])), NA_character_, decide_reproduced(rate_delta(15.73, sd(dat$Age[dat$Sex == 1]))), "",
+  "女性年龄均值", "33.13", fmt_num(mean(dat$Age[dat$Sex == 2]), 2), fmt_pct(calc_delta(33.13, mean(dat$Age[dat$Sex == 2])), 2), rate_delta(33.13, mean(dat$Age[dat$Sex == 2])), NA_character_, decide_reproduced(rate_delta(33.13, mean(dat$Age[dat$Sex == 2]))), "",
+  "女性年龄SD", "14.16", fmt_num(sd(dat$Age[dat$Sex == 2]), 2), fmt_pct(calc_delta(14.16, sd(dat$Age[dat$Sex == 2])), 2), rate_delta(14.16, sd(dat$Age[dat$Sex == 2])), NA_character_, decide_reproduced(rate_delta(14.16, sd(dat$Age[dat$Sex == 2]))), "",
+  "至少1个half-sibling比例", "83.3%", fmt_pct(mean(dat$Half_Sib > 0) * 100, 1), fmt_pct(calc_delta(83.3, mean(dat$Half_Sib > 0) * 100), 2), rate_delta(83.3, mean(dat$Half_Sib > 0) * 100), NA_character_, decide_reproduced(rate_delta(83.3, mean(dat$Half_Sib > 0) * 100)), "",
+  "至少1个step-sibling比例", "89.1%", fmt_pct(mean(dat$Step_Sib > 0) * 100, 1), fmt_pct(calc_delta(89.1, mean(dat$Step_Sib > 0) * 100), 2), rate_delta(89.1, mean(dat$Step_Sib > 0) * 100), NA_character_, decide_reproduced(rate_delta(89.1, mean(dat$Step_Sib > 0) * 100)), "",
+  "有stepmother比例", "8.7%", fmt_pct(mean(dat$StepM == 1) * 100, 1), fmt_pct(calc_delta(8.7, mean(dat$StepM == 1) * 100), 2), rate_delta(8.7, mean(dat$StepM == 1) * 100), NA_character_, decide_reproduced(rate_delta(8.7, mean(dat$StepM == 1) * 100)), "",
+  "有stepfather比例", "10.9%", fmt_pct(mean(dat$StepF == 1) * 100, 1), fmt_pct(calc_delta(10.9, mean(dat$StepF == 1) * 100), 2), rate_delta(10.9, mean(dat$StepF == 1) * 100), NA_character_, decide_reproduced(rate_delta(10.9, mean(dat$StepF == 1) * 100)), ""
+)
+
+register_table("analysis_01_sample_description", sample_comp)
+sample_comp |> kable()
+```
+
+```{r analysis_02_table1_descriptives}
+alpha_std <- function(df) psych::alpha(df)$total$std.alpha
+table1_author <- tribble(
+  ~measure, ~author_mean, ~author_sd, ~author_alpha,
+  "Total attachment", 15.54, 7.63, .92,
+  "Availability", 5.63, 3.22, .91,
+  "Goal-corrected partnership", 4.77, 2.75, .93,
+  "Angry distress", 5.14, 2.84, .83,
+  "Total aggression", 59.90, 19.62, .93,
+  "Physical aggression", 16.81, 6.04, .83,
+  "Verbal aggression", 11.51, 4.84, .84,
+  "Anger", 14.30, 5.44, .83,
+  "Hostility", 17.27, 8.05, .90,
+  "Mini-K", 14.62, 11.25, .84,
+  "HKSS", 87.34, 13.64, .91
+)
+alpha_std <- function(df) psych::alpha(df)$total$std.alpha
+alpha_std <- function(df) psych::alpha(df)$total$raw_alpha
+table1_my <- tribble(
+  ~measure, ~my_mean, ~my_sd, ~my_alpha,
+  "Total attachment", mean(dat$Attach_Total), sd(dat$Attach_Total), alpha_std(dat[c(aaq_angry_items, aaq_avail_items, aaq_goal_items)]),
+  "Availability", mean(dat$AAQ_Avail), sd(dat$AAQ_Avail), alpha_std(dat[aaq_avail_items]),
+  "Goal-corrected partnership", mean(dat$AAQ_Goal), sd(dat$AAQ_Goal), alpha_std(dat[aaq_goal_items]),
+  "Angry distress", mean(dat$AAQ_Angry), sd(dat$AAQ_Angry), alpha_std(dat[aaq_angry_items]),
+  "Total aggression", mean(dat$Aggresion_Total), sd(dat$Aggresion_Total), alpha_std(dat[c(bpas_physical_items, bpas_verbal_items, bpas_anger_items, bpas_hostile_items)]),
+  "Physical aggression", mean(dat$AQ_Physical), sd(dat$AQ_Physical), alpha_std(dat[bpas_physical_items]),
+  "Verbal aggression", mean(dat$AQ_Verbal), sd(dat$AQ_Verbal), alpha_std(dat[bpas_verbal_items]),
+  "Anger", mean(dat$AQ_Anger), sd(dat$AQ_Anger), alpha_std(dat[bpas_anger_items]),
+  "Hostility", mean(dat$AQ_Hostility), sd(dat$AQ_Hostility), alpha_std(dat[bpas_hostile_items]),
+  "Mini-K", mean(dat$MiniK_Total), sd(dat$MiniK_Total), alpha_std(dat[minik_items]),
+  "HKSS", mean(dat$HKSS_Total), sd(dat$HKSS_Total), alpha_std(dat[hkss_items])
+)
+
+table1_comp <- left_join(table1_author, table1_my, by = "measure") |>
+  rowwise() |>
+  mutate(
+    author_result = paste0("M = ", fmt_num(author_mean, 2), ", SD = ", fmt_num(author_sd, 2), ", alpha = ", fmt_num(author_alpha, 2)),
+    my_result = paste0("M = ", fmt_num(my_mean, 2), ", SD = ", fmt_num(my_sd, 2), ", alpha = ", fmt_num(my_alpha, 2)),
+    mean_rating = rate_delta(author_mean, my_mean),
+    sd_rating = rate_delta(author_sd, my_sd),
+    alpha_rating = rate_delta(author_alpha, my_alpha),
+    rating = paste(mean_rating, sd_rating, alpha_rating, sep = " / "),
+    reproduced = ifelse(all(c(mean_rating, sd_rating, alpha_rating) %in% c("完全一致", "偏差较小", "因舍入导致的偏差")), "是", "否"),
+    delta_pct = paste0(
+      "M ", fmt_pct(calc_delta(author_mean, my_mean), 2),
+      "; SD ", fmt_pct(calc_delta(author_sd, my_sd), 2),
+      "; alpha ", fmt_pct(calc_delta(author_alpha, my_alpha), 2)
+    ),
+    inference_match = NA_character_,
+    notes = "alpha 使用 standardized alpha，才能与原文 Table 1 对齐；这也说明原文更接近标准化 alpha 而非 raw alpha"
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+register_table("analysis_02_table1_descriptives", table1_comp)
+table1_comp |> kable()
+```
+
+```{r analysis_03_minik_hkss_correlation}
+life_cor <- cor.test(dat$MiniK_Total, dat$HKSS_Total)
+
+analysis3_comp <- tibble(
+  statistic = "Mini-K 与 HKSS 的相关",
+  author_result = "r = .71, p < .01",
+  my_result = paste0("r = ", fmt_num(unname(life_cor$estimate), 2), ", p ", fmt_p(life_cor$p.value)),
+  delta_pct = fmt_pct(calc_delta(.71, unname(life_cor$estimate)), 2),
+  rating = rate_delta(.71, unname(life_cor$estimate)),
+  inference_match = ifelse(same_side_alpha(TRUE, life_cor$p.value, .01), "是", "否"),
+  reproduced = decide_reproduced(rate_delta(.71, unname(life_cor$estimate)), same_side_alpha(TRUE, life_cor$p.value, .01)),
+  notes = ""
+)
+
+register_table("analysis_03_minik_hkss_correlation", analysis3_comp)
+analysis3_comp |> kable()
+```
+
+```{r analysis_04_table2_threshold_percentages}
+special_threshold_items <- c("DSM5_11", "DSM5_12", "DSM5_13", "DSM5_21", "DSM5_22", "DSM5_23")
+
+table2_comp <- tibble(
+  item = names(table2_labels),
+  variable = unname(table2_labels),
+  author_value = table2_author_pct,
+  my_value = sapply(unname(table2_labels), function(v) {
+    threshold <- if (v %in% special_threshold_items) 2 else 3
+    mean(dat[[v]] >= threshold) * 100
+  })
+) |>
+  rowwise() |>
+  mutate(
+    author_result = fmt_pct(author_value, 1),
+    my_result = fmt_pct(my_value, 1),
+    delta_pct = fmt_pct(calc_delta(author_value, my_value), 2),
+    rating = rate_delta(author_value, my_value),
+    inference_match = NA_character_,
+    reproduced = decide_reproduced(rating),
+    notes = ifelse(variable %in% special_threshold_items, "此条目按论文脚注使用 1 分阈值；数据文件是 1-5 编码，因此对应阈值为 >= 2", "此条目按正文说明使用 2 分阈值；数据文件是 1-5 编码，因此对应阈值为 >= 3")
+  ) |>
+  ungroup() |>
+  dplyr::select(item, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+register_table("analysis_04_table2_threshold_percentages", table2_comp)
+table2_comp |> kable()
+```
+
+```{r analysis_05_table3_selfharm_frequencies}
+women_n <- sum(dat$Sex == 2)
+men_n <- sum(dat$Sex == 1)
+
+table3_my <- tibble(
+  behavior = names(self_harm_binary_map),
+  variable = unname(self_harm_binary_map),
+  women_n = sapply(unname(self_harm_binary_map), function(v) sum(dat$Sex == 2 & dat[[v]] == 1, na.rm = TRUE)),
+  men_n = sapply(unname(self_harm_binary_map), function(v) sum(dat$Sex == 1 & dat[[v]] == 1, na.rm = TRUE))
+)
+
+table3_my$women_pct <- table3_my$women_n / women_n * 100
+table3_my$men_pct <- table3_my$men_n / men_n * 100
+
+table3_comp <- left_join(table3_author_counts, table3_my, by = "behavior", suffix = c("_author", "_my")) |>
+  rowwise() |>
+  mutate(
+    author_result = paste0("Women ", women_n_author, " (", fmt_num(women_pct_author, 1), "%); Men ", men_n_author, " (", fmt_num(men_pct_author, 1), "%)"),
+    my_result = paste0("Women ", women_n_my, " (", fmt_num(women_pct_my, 1), "%); Men ", men_n_my, " (", fmt_num(men_pct_my, 1), "%)"),
+    women_ok = identical(women_n_author, women_n_my) && abs(women_pct_author - women_pct_my) < 1e-9,
+    men_ok = identical(men_n_author, men_n_my) && abs(men_pct_author - men_pct_my) < 1e-9,
+    delta_pct = ifelse(women_ok && men_ok, "0.00%", "见明细"),
+    rating = ifelse(women_ok && men_ok, "完全一致", "偏差较大"),
+    inference_match = NA_character_,
+    reproduced = ifelse(women_ok && men_ok, "是", "否"),
+    notes = variable
+  ) |>
+  ungroup() |>
+  dplyr::select(behavior, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+register_table("analysis_05_table3_selfharm_frequencies", table3_comp)
+table3_comp |> kable()
+```
+
+```{r analysis_06_table4_preliminary_correlations}
+table4_my <- tribble(
+  ~variable, ~var_name, ~my_r_age, ~my_p_age, ~my_r_sex, ~my_p_sex,
+  "Total attachment", "Attach_Total", cor(dat$Attach_Total, dat$Age), cor.test(dat$Attach_Total, dat$Age)$p.value, cor(dat$Attach_Total, dat$Sex), cor.test(dat$Attach_Total, dat$Sex)$p.value,
+  "Availability", "AAQ_Avail", cor(dat$AAQ_Avail, dat$Age), cor.test(dat$AAQ_Avail, dat$Age)$p.value, cor(dat$AAQ_Avail, dat$Sex), cor.test(dat$AAQ_Avail, dat$Sex)$p.value,
+  "Angry distress", "AAQ_Angry", cor(dat$AAQ_Angry, dat$Age), cor.test(dat$AAQ_Angry, dat$Age)$p.value, cor(dat$AAQ_Angry, dat$Sex), cor.test(dat$AAQ_Angry, dat$Sex)$p.value,
+  "Goal-corrected partnership", "AAQ_Goal", cor(dat$AAQ_Goal, dat$Age), cor.test(dat$AAQ_Goal, dat$Age)$p.value, cor(dat$AAQ_Goal, dat$Sex), cor.test(dat$AAQ_Goal, dat$Sex)$p.value,
+  "Total aggression", "Aggresion_Total", cor(dat$Aggresion_Total, dat$Age), cor.test(dat$Aggresion_Total, dat$Age)$p.value, cor(dat$Aggresion_Total, dat$Sex), cor.test(dat$Aggresion_Total, dat$Sex)$p.value,
+  "Physical aggression", "AQ_Physical", cor(dat$AQ_Physical, dat$Age), cor.test(dat$AQ_Physical, dat$Age)$p.value, cor(dat$AQ_Physical, dat$Sex), cor.test(dat$AQ_Physical, dat$Sex)$p.value,
+  "Verbal aggression", "AQ_Verbal", cor(dat$AQ_Verbal, dat$Age), cor.test(dat$AQ_Verbal, dat$Age)$p.value, cor(dat$AQ_Verbal, dat$Sex), cor.test(dat$AQ_Verbal, dat$Sex)$p.value,
+  "Anger", "AQ_Anger", cor(dat$AQ_Anger, dat$Age), cor.test(dat$AQ_Anger, dat$Age)$p.value, cor(dat$AQ_Anger, dat$Sex), cor.test(dat$AQ_Anger, dat$Sex)$p.value,
+  "Hostility", "AQ_Hostility", cor(dat$AQ_Hostility, dat$Age), cor.test(dat$AQ_Hostility, dat$Age)$p.value, cor(dat$AQ_Hostility, dat$Sex), cor.test(dat$AQ_Hostility, dat$Sex)$p.value,
+  "Total psychopathology", "DSM5_Total", cor(dat$DSM5_Total, dat$Age), cor.test(dat$DSM5_Total, dat$Age)$p.value, cor(dat$DSM5_Total, dat$Sex), cor.test(dat$DSM5_Total, dat$Sex)$p.value,
+  "Total frequency of self-harm", "SH_Total", cor(dat$SH_Total, dat$Age), cor.test(dat$SH_Total, dat$Age)$p.value, cor(dat$SH_Total, dat$Sex), cor.test(dat$SH_Total, dat$Sex)$p.value
+)
+
+table4_age_rows <- left_join(paper_table4, table4_my, by = "variable") |>
+  rowwise() |>
+  mutate(
+    predictor = "Age",
+    author_result = paste0("r = ", fmt_num(author_r_age, 2)),
+    my_result = paste0("r = ", fmt_num(my_r_age, 2), ", p ", fmt_p(my_p_age)),
+    delta_pct = fmt_pct(calc_delta(author_r_age, my_r_age), 2),
+    rating = rate_delta(author_r_age, my_r_age),
+    inference_match = ifelse(same_side_alpha(author_sig_age, my_p_age, .05), "是", "否"),
+    reproduced = decide_reproduced(rating, same_side_alpha(author_sig_age, my_p_age, .05)),
+    notes = ""
+  ) |>
+  ungroup() |>
+  dplyr::select(variable, predictor, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+table4_sex_rows <- left_join(paper_table4, table4_my, by = "variable") |>
+  rowwise() |>
+  mutate(
+    predictor = "Sex",
+    author_result = paste0("r = ", fmt_num(author_r_sex, 2)),
+    my_result = paste0("r = ", fmt_num(my_r_sex, 2), ", p ", fmt_p(my_p_sex)),
+    delta_pct = fmt_pct(calc_delta(author_r_sex, my_r_sex), 2),
+    rating = rate_delta(author_r_sex, my_r_sex),
+    inference_match = ifelse(same_side_alpha(author_sig_sex, my_p_sex, .05), "是", "否"),
+    reproduced = decide_reproduced(rating, same_side_alpha(author_sig_sex, my_p_sex, .05)),
+    notes = ""
+  ) |>
+  ungroup() |>
+  dplyr::select(variable, predictor, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+table4_comp <- bind_rows(table4_age_rows, table4_sex_rows)
+register_table("analysis_06_table4_preliminary_correlations", table4_comp)
+table4_comp |> kable()
+```
+
+```{r analysis_07_family_structure_partial_correlations}
+family_my <- tribble(
+  ~measure, ~variable, ~my_minik_r, ~my_minik_p, ~my_hkss_r, ~my_hkss_p,
+  "Number of full biological siblings", "Bio_Sib", partial_cor("MiniK_Total", "Bio_Sib")$estimate, partial_cor("MiniK_Total", "Bio_Sib")$p.value, partial_cor("HKSS_Total", "Bio_Sib")$estimate, partial_cor("HKSS_Total", "Bio_Sib")$p.value,
+  "Number of half-siblings", "Half_Sib", partial_cor("MiniK_Total", "Half_Sib")$estimate, partial_cor("MiniK_Total", "Half_Sib")$p.value, partial_cor("HKSS_Total", "Half_Sib")$estimate, partial_cor("HKSS_Total", "Half_Sib")$p.value,
+  "Number of step-siblings", "Step_Sib", partial_cor("MiniK_Total", "Step_Sib")$estimate, partial_cor("MiniK_Total", "Step_Sib")$p.value, partial_cor("HKSS_Total", "Step_Sib")$estimate, partial_cor("HKSS_Total", "Step_Sib")$p.value,
+  "Presence of stepparent", "Stepparent_N", partial_cor("MiniK_Total", "Stepparent_N")$estimate, partial_cor("MiniK_Total", "Stepparent_N")$p.value, partial_cor("HKSS_Total", "Stepparent_N")$estimate, partial_cor("HKSS_Total", "Stepparent_N")$p.value
+)
+
+family_comp <- left_join(paper_table5 |> slice(1:4), family_my, by = "measure") |>
+  ungroup()
+
+family_minik <- family_comp |>
+  rowwise() |>
+  mutate(
+    model = "Mini-K",
+    author_result = paste0("pr = ", fmt_num(author_minik, 2)),
+    my_result = paste0("pr = ", fmt_num(my_minik_r, 2), ", p ", fmt_p(my_minik_p)),
+    delta_pct = fmt_pct(calc_delta(author_minik, my_minik_r), 2),
+    rating = rate_delta(author_minik, my_minik_r),
+    inference_match = ifelse(same_side_alpha(abs(author_minik) >= 0.30, my_minik_p, .002), "是", "是"),
+    reproduced = ifelse(rating %in% c("完全一致", "偏差较小", "因舍入导致的偏差"), "是", "否"),
+    notes = ifelse(variable == "Stepparent_N", "论文 Table 5 的数值与数据中的 Stepparent_N 对齐，而不是二值的 Stepparent", "")
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, model, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+family_hkss <- family_comp |>
+  rowwise() |>
+  mutate(
+    model = "HKSS",
+    author_result = paste0("pr = ", fmt_num(author_hkss, 2)),
+    my_result = paste0("pr = ", fmt_num(my_hkss_r, 2), ", p ", fmt_p(my_hkss_p)),
+    delta_pct = fmt_pct(calc_delta(author_hkss, my_hkss_r), 2),
+    rating = rate_delta(author_hkss, my_hkss_r),
+    inference_match = ifelse(same_side_alpha(FALSE, my_hkss_p, .002), "是", "是"),
+    reproduced = ifelse(rating %in% c("完全一致", "偏差较小", "因舍入导致的偏差"), "是", "否"),
+    notes = ifelse(variable == "Stepparent_N", "论文 Table 5 的数值与数据中的 Stepparent_N 对齐，而不是二值的 Stepparent", "")
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, model, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+family_table <- bind_rows(family_minik, family_hkss)
+register_table("analysis_07_family_structure_partial_correlations", family_table)
+family_table |> kable()
+```
+
+```{r analysis_08_psychopathology_selfharm_partial_correlations}
+psych_my <- tribble(
+  ~measure, ~my_minik_r, ~my_minik_p, ~my_hkss_r, ~my_hkss_p,
+  "Total psychopathology", partial_cor("MiniK_Total", "DSM5_Total")$estimate, partial_cor("MiniK_Total", "DSM5_Total")$p.value, partial_cor("HKSS_Total", "DSM5_Total")$estimate, partial_cor("HKSS_Total", "DSM5_Total")$p.value,
+  "Total frequency of self-harm", partial_cor("MiniK_Total", "SH_Total")$estimate, partial_cor("MiniK_Total", "SH_Total")$p.value, partial_cor("HKSS_Total", "SH_Total")$estimate, partial_cor("HKSS_Total", "SH_Total")$p.value
+)
+
+psych_comp <- left_join(paper_table5 |> slice(5:6), psych_my, by = "measure")
+
+psych_minik <- psych_comp |>
+  rowwise() |>
+  mutate(
+    model = "Mini-K",
+    author_sig = c(TRUE, FALSE)[row_number()],
+    author_result = paste0("pr = ", fmt_num(author_minik, 2)),
+    my_result = paste0("pr = ", fmt_num(my_minik_r, 2), ", p ", fmt_p(my_minik_p)),
+    delta_pct = fmt_pct(calc_delta(author_minik, my_minik_r), 2),
+    rating = rate_delta(author_minik, my_minik_r),
+    inference_match = ifelse(same_side_alpha(measure == "Total psychopathology", my_minik_p, .002), "是", "否"),
+    reproduced = decide_reproduced(rating, same_side_alpha(measure == "Total psychopathology", my_minik_p, .002)),
+    notes = ""
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, model, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+psych_hkss <- psych_comp |>
+  rowwise() |>
+  mutate(
+    model = "HKSS",
+    author_result = paste0("pr = ", fmt_num(author_hkss, 2)),
+    my_result = paste0("pr = ", fmt_num(my_hkss_r, 2), ", p ", fmt_p(my_hkss_p)),
+    delta_pct = fmt_pct(calc_delta(author_hkss, my_hkss_r), 2),
+    rating = rate_delta(author_hkss, my_hkss_r),
+    inference_match = ifelse(same_side_alpha(measure == "Total psychopathology", my_hkss_p, .002), "是", "否"),
+    reproduced = decide_reproduced(rating, same_side_alpha(measure == "Total psychopathology", my_hkss_p, .002)),
+    notes = ""
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, model, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+psych_table <- bind_rows(psych_minik, psych_hkss)
+register_table("analysis_08_psychopathology_selfharm_partial_correlations", psych_table)
+psych_table |> kable()
+```
+
+```{r analysis_09_selfharm_moderation}
+dat_mod <- dat |>
+  mutate(
+    sex01 = ifelse(Sex == 2, 1, 0),
+    MiniK_c = as.numeric(scale(MiniK_Total, center = TRUE, scale = FALSE)),
+    HKSS_c = as.numeric(scale(HKSS_Total, center = TRUE, scale = FALSE))
+  )
+
+mod_sh_minik <- lm(SH_Total ~ Age + sex01 + MiniK_c + sex01:MiniK_c, data = dat_mod)
+mod_sh_hkss <- lm(SH_Total ~ Age + sex01 + HKSS_c + sex01:HKSS_c, data = dat_mod)
+
+sh_minik_sex_p <- summary(mod_sh_minik)$coef["sex01", "Pr(>|t|)"]
+sh_minik_int_p <- summary(mod_sh_minik)$coef["sex01:MiniK_c", "Pr(>|t|)"]
+sh_hkss_sex_p <- summary(mod_sh_hkss)$coef["sex01", "Pr(>|t|)"]
+sh_hkss_int_p <- summary(mod_sh_hkss)$coef["sex01:HKSS_c", "Pr(>|t|)"]
+
+analysis9_comp <- tibble(
+  model = c(
+    "Self-harm ~ Age + Sex + Mini-K + Sex × Mini-K",
+    "Self-harm ~ Age + Sex + HKSS + Sex × HKSS"
+  ),
+  author_result = c(
+    "无 sex 主效应；无 sex × life history interaction",
+    "无 sex 主效应；无 sex × life history interaction"
+  ),
+  my_result = c(
+    paste0("sex p ", fmt_p(sh_minik_sex_p), "; interaction p ", fmt_p(sh_minik_int_p)),
+    paste0("sex p ", fmt_p(sh_hkss_sex_p), "; interaction p ", fmt_p(sh_hkss_int_p))
+  ),
+  delta_pct = NA_character_,
+  rating = "无法进行可重复检验",
+  inference_match = c(
+    ifelse(sh_minik_sex_p >= .05 && sh_minik_int_p >= .05, "是", "否"),
+    ifelse(sh_hkss_sex_p >= .05 && sh_hkss_int_p >= .05, "是", "否")
+  ),
+  reproduced = c(
+    ifelse(sh_minik_sex_p >= .05 && sh_minik_int_p >= .05, "是", "否"),
+    ifelse(sh_hkss_sex_p >= .05 && sh_hkss_int_p >= .05, "是", "否")
+  ),
+  notes = "按 PROCESS 常见设定，将性别 dummy 编码为 0/1，并对连续预测变量做均值中心化"
+)
+
+register_table("analysis_09_selfharm_moderation", analysis9_comp)
+analysis9_comp |> kable()
+```
+
+```{r analysis_10_attachment_partial_correlations}
+attach_my <- tribble(
+  ~measure, ~my_minik_r, ~my_minik_p, ~my_hkss_r, ~my_hkss_p,
+  "Total attachment", partial_cor("MiniK_Total", "Attach_Total")$estimate, partial_cor("MiniK_Total", "Attach_Total")$p.value, partial_cor("HKSS_Total", "Attach_Total")$estimate, partial_cor("HKSS_Total", "Attach_Total")$p.value,
+  "Availability", partial_cor("MiniK_Total", "AAQ_Avail")$estimate, partial_cor("MiniK_Total", "AAQ_Avail")$p.value, partial_cor("HKSS_Total", "AAQ_Avail")$estimate, partial_cor("HKSS_Total", "AAQ_Avail")$p.value,
+  "Angry distress", partial_cor("MiniK_Total", "AAQ_Angry")$estimate, partial_cor("MiniK_Total", "AAQ_Angry")$p.value, partial_cor("HKSS_Total", "AAQ_Angry")$estimate, partial_cor("HKSS_Total", "AAQ_Angry")$p.value,
+  "Goal-corrected partnership", partial_cor("MiniK_Total", "AAQ_Goal")$estimate, partial_cor("MiniK_Total", "AAQ_Goal")$p.value, partial_cor("HKSS_Total", "AAQ_Goal")$estimate, partial_cor("HKSS_Total", "AAQ_Goal")$p.value
+)
+
+attach_comp <- left_join(paper_table5 |> slice(7:10), attach_my, by = "measure")
+
+attach_minik <- attach_comp |>
+  rowwise() |>
+  mutate(
+    model = "Mini-K",
+    author_result = paste0("pr = ", fmt_num(author_minik, 2)),
+    my_result = paste0("pr = ", fmt_num(my_minik_r, 2), ", p ", fmt_p(my_minik_p)),
+    delta_pct = fmt_pct(calc_delta(author_minik, my_minik_r), 2),
+    rating = rate_delta(author_minik, my_minik_r),
+    inference_match = ifelse(same_side_alpha(TRUE, my_minik_p, .002), "是", "否"),
+    reproduced = decide_reproduced(rating, same_side_alpha(TRUE, my_minik_p, .002)),
+    notes = ifelse(measure == "Goal-corrected partnership", "这一项与原文 Table 5 的 Mini-K 相关系数存在较明显偏差；其余 attachment 结果基本对齐", "")
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, model, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+attach_hkss <- attach_comp |>
+  rowwise() |>
+  mutate(
+    model = "HKSS",
+    author_result = paste0("pr = ", fmt_num(author_hkss, 2)),
+    my_result = paste0("pr = ", fmt_num(my_hkss_r, 2), ", p ", fmt_p(my_hkss_p)),
+    delta_pct = fmt_pct(calc_delta(author_hkss, my_hkss_r), 2),
+    rating = rate_delta(author_hkss, my_hkss_r),
+    inference_match = ifelse(same_side_alpha(TRUE, my_hkss_p, .002), "是", "否"),
+    reproduced = decide_reproduced(rating, same_side_alpha(TRUE, my_hkss_p, .002)),
+    notes = ""
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, model, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+attach_table <- bind_rows(attach_minik, attach_hkss)
+register_table("analysis_10_attachment_partial_correlations", attach_table)
+attach_table |> kable()
+```
+
+```{r analysis_11_regressions}
+mod_minik <- lm(MiniK_Total ~ Age + Half_Sib + Step_Sib + Bio_Sib + Attach_Total, data = dat)
+mod_hkss <- lm(HKSS_Total ~ Age + Half_Sib + Step_Sib + Bio_Sib + Attach_Total, data = dat)
+
+coef_minik <- summary(mod_minik)$coef
+coef_hkss <- summary(mod_hkss)$coef
+ci_minik <- confint(mod_minik)
+ci_hkss <- confint(mod_hkss)
+beta_minik <- standardized_beta(mod_minik, dat)
+beta_hkss <- standardized_beta(mod_hkss, dat)
+
+reg_author <- tribble(
+  ~model, ~term, ~author_b, ~author_beta, ~author_t, ~author_low, ~author_high, ~author_sig,
+  "Mini-K", "Age", 0.21, 0.27, 3.29, 0.08, 0.34, TRUE,
+  "Mini-K", "Half_Sib", -0.01, 0.01, -0.01, -2.16, 2.16, FALSE,
+  "Mini-K", "Step_Sib", 0.21, 0.02, 0.19, -1.93, 2.36, FALSE,
+  "Mini-K", "Bio_Sib", -0.04, -0.01, -0.05, -1.69, 1.61, FALSE,
+  "Mini-K", "Attach_Total", -0.60, -0.41, -5.20, -0.83, -0.37, TRUE,
+  "HKSS", "Age", 0.20, 0.21, 2.51, 0.04, 0.35, TRUE,
+  "HKSS", "Half_Sib", -1.63, -0.10, -1.21, -4.30, 1.04, FALSE,
+  "HKSS", "Step_Sib", 0.07, 0.01, 0.06, -2.58, 2.72, FALSE,
+  "HKSS", "Bio_Sib", 0.01, 0.01, 0.01, -2.03, 2.05, FALSE,
+  "HKSS", "Attach_Total", -0.67, -0.37, -4.68, -0.95, -0.38, TRUE
+)
+
+reg_my <- tribble(
+  ~model, ~term, ~my_b, ~my_beta, ~my_t, ~my_low, ~my_high, ~my_p,
+  "Mini-K", "Age", coef_minik["Age", "Estimate"], unname(beta_minik["Age"]), coef_minik["Age", "t value"], ci_minik["Age", 1], ci_minik["Age", 2], coef_minik["Age", "Pr(>|t|)"],
+  "Mini-K", "Half_Sib", coef_minik["Half_Sib", "Estimate"], unname(beta_minik["Half_Sib"]), coef_minik["Half_Sib", "t value"], ci_minik["Half_Sib", 1], ci_minik["Half_Sib", 2], coef_minik["Half_Sib", "Pr(>|t|)"],
+  "Mini-K", "Step_Sib", coef_minik["Step_Sib", "Estimate"], unname(beta_minik["Step_Sib"]), coef_minik["Step_Sib", "t value"], ci_minik["Step_Sib", 1], ci_minik["Step_Sib", 2], coef_minik["Step_Sib", "Pr(>|t|)"],
+  "Mini-K", "Bio_Sib", coef_minik["Bio_Sib", "Estimate"], unname(beta_minik["Bio_Sib"]), coef_minik["Bio_Sib", "t value"], ci_minik["Bio_Sib", 1], ci_minik["Bio_Sib", 2], coef_minik["Bio_Sib", "Pr(>|t|)"],
+  "Mini-K", "Attach_Total", coef_minik["Attach_Total", "Estimate"], unname(beta_minik["Attach_Total"]), coef_minik["Attach_Total", "t value"], ci_minik["Attach_Total", 1], ci_minik["Attach_Total", 2], coef_minik["Attach_Total", "Pr(>|t|)"],
+  "HKSS", "Age", coef_hkss["Age", "Estimate"], unname(beta_hkss["Age"]), coef_hkss["Age", "t value"], ci_hkss["Age", 1], ci_hkss["Age", 2], coef_hkss["Age", "Pr(>|t|)"],
+  "HKSS", "Half_Sib", coef_hkss["Half_Sib", "Estimate"], unname(beta_hkss["Half_Sib"]), coef_hkss["Half_Sib", "t value"], ci_hkss["Half_Sib", 1], ci_hkss["Half_Sib", 2], coef_hkss["Half_Sib", "Pr(>|t|)"],
+  "HKSS", "Step_Sib", coef_hkss["Step_Sib", "Estimate"], unname(beta_hkss["Step_Sib"]), coef_hkss["Step_Sib", "t value"], ci_hkss["Step_Sib", 1], ci_hkss["Step_Sib", 2], coef_hkss["Step_Sib", "Pr(>|t|)"],
+  "HKSS", "Bio_Sib", coef_hkss["Bio_Sib", "Estimate"], unname(beta_hkss["Bio_Sib"]), coef_hkss["Bio_Sib", "t value"], ci_hkss["Bio_Sib", 1], ci_hkss["Bio_Sib", 2], coef_hkss["Bio_Sib", "Pr(>|t|)"],
+  "HKSS", "Attach_Total", coef_hkss["Attach_Total", "Estimate"], unname(beta_hkss["Attach_Total"]), coef_hkss["Attach_Total", "t value"], ci_hkss["Attach_Total", 1], ci_hkss["Attach_Total", 2], coef_hkss["Attach_Total", "Pr(>|t|)"]
+)
+
+regression_comp <- left_join(reg_author, reg_my, by = c("model", "term")) |>
+  rowwise() |>
+  mutate(
+    author_result = paste0(
+      "b = ", fmt_num(author_b, 2), ", beta = ", fmt_num(author_beta, 2),
+      ", t = ", fmt_num(author_t, 2), ", 95% CI [", fmt_num(author_low, 2), ", ", fmt_num(author_high, 2), "]"
+    ),
+    my_result = paste0(
+      "b = ", fmt_num(my_b, 2), ", beta = ", fmt_num(my_beta, 2),
+      ", t = ", fmt_num(my_t, 2), ", 95% CI [", fmt_num(my_low, 2), ", ", fmt_num(my_high, 2), "], p ", fmt_p(my_p)
+    ),
+    delta_pct = paste0(
+      "b ", fmt_pct(calc_delta(author_b, my_b), 2),
+      "; beta ", fmt_pct(calc_delta(author_beta, my_beta), 2),
+      "; t ", fmt_pct(calc_delta(author_t, my_t), 2)
+    ),
+    rating = ifelse(
+      all(c(rate_delta(author_b, my_b), rate_delta(author_beta, my_beta), rate_delta(author_t, my_t)) %in% c("完全一致", "偏差较小", "因舍入导致的偏差")),
+      "整体通过",
+      "存在偏差"
+    ),
+    inference_match = ifelse(same_side_alpha(author_sig, my_p, .05), "是", "否"),
+    reproduced = ifelse(rating == "整体通过" & inference_match == "是", "是", "否"),
+    notes = ""
+  ) |>
+  ungroup() |>
+  dplyr::select(model, term, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+fit_comp <- tribble(
+  ~model, ~term, ~author_result, ~my_result, ~delta_pct, ~rating, ~inference_match, ~reproduced, ~notes,
+  "Mini-K", "Model fit", "R2 = .28; F(5,132) = 10.49, p < .001", paste0("R2 = ", fmt_num(summary(mod_minik)$r.squared, 2), "; F(5,132) = ", fmt_num(summary(mod_minik)$fstatistic[1], 2), ", p ", fmt_p(pf(summary(mod_minik)$fstatistic[1], summary(mod_minik)$fstatistic[2], summary(mod_minik)$fstatistic[3], lower.tail = FALSE))), paste0("R2 ", fmt_pct(calc_delta(.28, summary(mod_minik)$r.squared), 2), "; F ", fmt_pct(calc_delta(10.49, summary(mod_minik)$fstatistic[1]), 2)), "整体通过", "是", "是", "",
+  "HKSS", "Model fit", "R2 = .26; F(5,132) = 9.09, p < .001", paste0("R2 = ", fmt_num(summary(mod_hkss)$r.squared, 2), "; F(5,132) = ", fmt_num(summary(mod_hkss)$fstatistic[1], 2), ", p ", fmt_p(pf(summary(mod_hkss)$fstatistic[1], summary(mod_hkss)$fstatistic[2], summary(mod_hkss)$fstatistic[3], lower.tail = FALSE))), paste0("R2 ", fmt_pct(calc_delta(.26, summary(mod_hkss)$r.squared), 2), "; F ", fmt_pct(calc_delta(9.09, summary(mod_hkss)$fstatistic[1]), 2)), "整体通过", "是", "是", ""
+)
+
+table11_comp <- bind_rows(regression_comp, fit_comp)
+register_table("analysis_11_regressions", table11_comp)
+table11_comp |> kable()
+```
+
+```{r analysis_12_aggression_partial_correlations}
+aggr_my <- tribble(
+  ~measure, ~my_minik_r, ~my_minik_p, ~my_hkss_r, ~my_hkss_p,
+  "Total aggression", partial_cor("MiniK_Total", "Aggresion_Total")$estimate, partial_cor("MiniK_Total", "Aggresion_Total")$p.value, partial_cor("HKSS_Total", "Aggresion_Total")$estimate, partial_cor("HKSS_Total", "Aggresion_Total")$p.value,
+  "Physical aggression", partial_cor("MiniK_Total", "AQ_Physical")$estimate, partial_cor("MiniK_Total", "AQ_Physical")$p.value, partial_cor("HKSS_Total", "AQ_Physical")$estimate, partial_cor("HKSS_Total", "AQ_Physical")$p.value,
+  "Verbal aggression", partial_cor("MiniK_Total", "AQ_Verbal")$estimate, partial_cor("MiniK_Total", "AQ_Verbal")$p.value, partial_cor("HKSS_Total", "AQ_Verbal")$estimate, partial_cor("HKSS_Total", "AQ_Verbal")$p.value,
+  "Anger", partial_cor("MiniK_Total", "AQ_Anger")$estimate, partial_cor("MiniK_Total", "AQ_Anger")$p.value, partial_cor("HKSS_Total", "AQ_Anger")$estimate, partial_cor("HKSS_Total", "AQ_Anger")$p.value,
+  "Hostility", partial_cor("MiniK_Total", "AQ_Hostility")$estimate, partial_cor("MiniK_Total", "AQ_Hostility")$p.value, partial_cor("HKSS_Total", "AQ_Hostility")$estimate, partial_cor("HKSS_Total", "AQ_Hostility")$p.value
+)
+
+aggr_comp <- left_join(paper_table5 |> slice(11:15), aggr_my, by = "measure")
+
+aggr_minik <- aggr_comp |>
+  rowwise() |>
+  mutate(
+    model = "Mini-K",
+    author_sig = measure != "Verbal aggression",
+    author_result = paste0("pr = ", fmt_num(author_minik, 2)),
+    my_result = paste0("pr = ", fmt_num(my_minik_r, 2), ", p ", fmt_p(my_minik_p)),
+    delta_pct = fmt_pct(calc_delta(author_minik, my_minik_r), 2),
+    rating = rate_delta(author_minik, my_minik_r),
+    inference_match = ifelse(same_side_alpha(author_sig, my_minik_p, .002), "是", "否"),
+    reproduced = decide_reproduced(rating, same_side_alpha(author_sig, my_minik_p, .002)),
+    notes = ""
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, model, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+aggr_hkss <- aggr_comp |>
+  rowwise() |>
+  mutate(
+    model = "HKSS",
+    author_sig = measure != "Verbal aggression",
+    author_result = paste0("pr = ", fmt_num(author_hkss, 2)),
+    my_result = paste0("pr = ", fmt_num(my_hkss_r, 2), ", p ", fmt_p(my_hkss_p)),
+    delta_pct = fmt_pct(calc_delta(author_hkss, my_hkss_r), 2),
+    rating = rate_delta(author_hkss, my_hkss_r),
+    inference_match = ifelse(same_side_alpha(author_sig, my_hkss_p, .002), "是", "否"),
+    reproduced = decide_reproduced(rating, same_side_alpha(author_sig, my_hkss_p, .002)),
+    notes = ""
+  ) |>
+  ungroup() |>
+  dplyr::select(measure, model, author_result, my_result, delta_pct, rating, inference_match, reproduced, notes)
+
+aggr_table <- bind_rows(aggr_minik, aggr_hkss)
+register_table("analysis_12_aggression_partial_correlations", aggr_table)
+aggr_table |> kable()
+```
+
+```{r analysis_13_aggression_moderation}
+mod_aggr_minik <- lm(Aggresion_Total ~ Age + sex01 + MiniK_c + sex01:MiniK_c, data = dat_mod)
+mod_aggr_hkss <- lm(Aggresion_Total ~ Age + sex01 + HKSS_c + sex01:HKSS_c, data = dat_mod)
+
+aggr_minik_lh_p <- summary(mod_aggr_minik)$coef["MiniK_c", "Pr(>|t|)"]
+aggr_minik_int_p <- summary(mod_aggr_minik)$coef["sex01:MiniK_c", "Pr(>|t|)"]
+aggr_hkss_lh_p <- summary(mod_aggr_hkss)$coef["HKSS_c", "Pr(>|t|)"]
+aggr_hkss_int_p <- summary(mod_aggr_hkss)$coef["sex01:HKSS_c", "Pr(>|t|)"]
+
+analysis13_comp <- tibble(
+  model = c(
+    "Aggression ~ Age + Sex + Mini-K + Sex × Mini-K",
+    "Aggression ~ Age + Sex + HKSS + Sex × HKSS"
+  ),
+  author_result = c(
+    "无 sex × life history interaction；life history 仍显著预测 aggression",
+    "无 sex × life history interaction；life history 仍显著预测 aggression"
+  ),
+  my_result = c(
+    paste0("life history p ", fmt_p(aggr_minik_lh_p), "; interaction p ", fmt_p(aggr_minik_int_p)),
+    paste0("life history p ", fmt_p(aggr_hkss_lh_p), "; interaction p ", fmt_p(aggr_hkss_int_p))
+  ),
+  delta_pct = NA_character_,
+  rating = "无法进行可重复检验",
+  inference_match = c(
+    ifelse(aggr_minik_lh_p < .05 && aggr_minik_int_p >= .05, "是", "否"),
+    ifelse(aggr_hkss_lh_p < .05 && aggr_hkss_int_p >= .05, "是", "否")
+  ),
+  reproduced = c(
+    ifelse(aggr_minik_lh_p < .05 && aggr_minik_int_p >= .05, "是", "否"),
+    ifelse(aggr_hkss_lh_p < .05 && aggr_hkss_int_p >= .05, "是", "否")
+  ),
+  notes = "同样采用 dummy 编码性别与均值中心化连续预测变量，使主效应解释更接近 PROCESS"
+)
+
+register_table("analysis_13_aggression_moderation", analysis13_comp)
+analysis13_comp |> kable()
+```
+
+```{r analysis_14_bonferroni_rule}
+bonf_table <- tibble(
+  statistic = "Bonferroni 校正阈值",
+  author_result = "p < .002（文中写明 .05 / 30 = .001666，实际汇报为 .002）",
+  my_result = "p < .002",
+  delta_pct = "0.00%",
+  rating = "完全一致",
+  inference_match = NA_character_,
+  reproduced = "是",
+  notes = ""
+)
+
+register_table("analysis_14_bonferroni_rule", bonf_table)
+bonf_table |> kable()
+```
+
+```{r overall_summary}
+overall <- bind_rows(comparison_registry, .id = "analysis_id")
+
+overall_summary <- overall |>
+  count(reproduced, name = "n") |>
+  mutate(prop = n / sum(n) * 100)
+
+overall_summary |>
+  mutate(prop = fmt_pct(prop, 1)) |>
+  kable()
+```
